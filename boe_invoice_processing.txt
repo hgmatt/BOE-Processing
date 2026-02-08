@@ -206,8 +206,14 @@ for idx, file_path in enumerate(file_paths, 1):
 # COMMAND ----------
 
 results_df = pd.DataFrame(results)
+
 display(results_df)
 
 output_csv = "/dbfs/mnt/output/boe_invoice_assessments.csv"
 results_df.to_csv(output_csv, index=False)
-print(f"Saved output to {output_csv}")
+print(f"Saved output locally to {output_csv}")
+
+# Save output back to SharePoint
+output_sharepoint_path = f"{SHAREPOINT_FOLDER_PATH.rstrip('/')}/boe_invoice_assessments.csv"
+sp_file.upload_bytes(results_df.to_csv(index=False).encode("utf-8"), output_sharepoint_path)
+print(f"Uploaded output to SharePoint: {output_sharepoint_path}")
