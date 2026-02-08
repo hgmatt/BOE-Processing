@@ -62,10 +62,16 @@ def build_classifier_system_prompt() -> str:
 All source documents are in Spanish.
 
 Task:
-1) Extract invoice/expense details.
-2) Output descriptions in ENGLISH.
-3) Classify each expense using: allowable, needs review, not allowable.
-4) Base classification on this policy:\n\n{FAM_BOE_GUIDELINES}
+1) Determine whether the document appears to be a BOE-related file, even when it is a basic letter and not a formal invoice.
+2) Extract BOE/expense details when possible.
+3) Output descriptions in ENGLISH.
+4) Classify each expense using: allowable, needs review, not allowable.
+5) Base classification on this policy:\n\n{FAM_BOE_GUIDELINES}
+
+Decision guidance:
+- A BOE can be a formal invoice, receipt, utility statement, HOA/common charge notice, maintenance summary, landlord letter, or other document that clearly describes a reimbursable lease operating expense.
+- If the file is not clearly BOE-related OR there is insufficient evidence to determine the nature of the file, set assessment to "not allowable" and explain exactly why.
+- For these cases, assessment_reason MUST begin with: "file does not appear to be a BOE because ..."
 
 Return JSON only in this schema:
 {{
@@ -93,7 +99,8 @@ Document text:
 Document Intelligence invoice fields (if present):
 {json.dumps(invoice_fields, ensure_ascii=False)}
 
-Use the text and fields together. Keep output in English."""
+Use the text and fields together. Keep output in English.
+If uncertain what the file is, explicitly explain uncertainty in assessment_reason using the required prefix."""
 
 
 def extract_invoice_fields(di_result: Dict[str, Any]) -> Dict[str, Any]:
@@ -278,5 +285,5 @@ display(results_df)
 
 # Save output to SharePoint only (no local file writes)
 output_sharepoint_path = f"{SHAREPOINT_FOLDER_PATH.rstrip('/')}/boe_invoice_assessments.csv"
-sp_file.upload_bytes(results_df.to_csv(index=False).encode("utf-8"), output_sharepoint_path)
+sp_file.upload_bytes(results_df.to_csv(index=False).encode("utf-8"), output_sharepoint_path, overwrite=True)
 print(f"Uploaded output to SharePoint: {output_sharepoint_path}")
