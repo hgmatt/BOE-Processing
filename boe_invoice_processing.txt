@@ -117,6 +117,53 @@ def extract_invoice_fields(di_result: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+def run_document_intelligence(file_bytes: bytes) -> Dict[str, Any]:
+    """Run multiple Document Intelligence models for broad coverage.
+
+    Supports machine-readable PDFs, scanned files, and handwritten notes.
+    """
+    model_attempts = ["prebuilt-invoice", "prebuilt-read", "prebuilt-layout"]
+    combined: Dict[str, Any] = {"content": "", "documents": []}
+
+    for model_id in model_attempts:
+        try:
+            result = doc_client.analyze_document(document_bytes=file_bytes, model_id=model_id)
+            if result.get("content") and len(result.get("content", "")) > len(combined.get("content", "")):
+                combined["content"] = result["content"]
+
+            if result.get("documents"):
+                combined["documents"].extend(result["documents"])
+        except Exception as model_error:
+            print(f"  Document Intelligence model failed ({model_id}): {model_error}")
+
+    return combined
+
+
+def extract_best_available_text(file_path: str, file_bytes: bytes, di_result: Dict[str, Any]) -> str:
+    """Extract text robustly across digital PDFs, scanned images, and handwriting."""
+    di_text = (di_result or {}).get("content", "") or ""
+    if di_text.strip():
+        return di_text
+
+    # AI-aware text extraction can route to OCR and handwriting-capable paths.
+    ai_text = extract_text(file_bytes, ai=True)
+    if ai_text and ai_text.strip():
+        return ai_text
+
+    # Vision OCR fallback for image-like docs and hard OCR edge cases.
+    vision_text = fh_vision.analyze_text(file_bytes, return_plain_text=True)
+    if vision_text and vision_text.strip():
+        return vision_text
+
+    # Final fallback: light text extraction from PDF bytes (machine readable content).
+    text_fallback = extract_text(file_bytes, ai=False)
+    if text_fallback and text_fallback.strip():
+        return text_fallback
+
+    # If still empty, provide a marker so downstream LLM has context.
+    return f"[No text extracted from {file_path}. Potentially image-only or unsupported format.]"
+
+
 def translate_if_needed(text: str) -> str:
     if not text:
         return ""
@@ -165,10 +212,10 @@ for idx, file_path in enumerate(file_paths, 1):
     try:
         content = sp_file.download_file(file_path, return_bytes=True)
 
-        # Prefer invoice model first, then OCR fallback for broader docs
-        di_result = doc_client.analyze_document(document_bytes=content, model_id="prebuilt-invoice")
+        # Use multiple Document Intelligence models for machine PDFs, scans, and handwriting.
+        di_result = run_document_intelligence(content)
         invoice_fields = extract_invoice_fields(di_result)
-        extracted_text = di_result.get("content", "") or extract_text(content, ai=True)
+        extracted_text = extract_best_available_text(file_path, content, di_result)
 
         user_prompt = build_classifier_user_prompt(file_path.split("/")[-1], extracted_text, invoice_fields)
         response = prompter.chat(
@@ -209,11 +256,7 @@ results_df = pd.DataFrame(results)
 
 display(results_df)
 
-output_csv = "/dbfs/mnt/output/boe_invoice_assessments.csv"
-results_df.to_csv(output_csv, index=False)
-print(f"Saved output locally to {output_csv}")
-
-# Save output back to SharePoint
+# Save output to SharePoint only (no local file writes)
 output_sharepoint_path = f"{SHAREPOINT_FOLDER_PATH.rstrip('/')}/boe_invoice_assessments.csv"
 sp_file.upload_bytes(results_df.to_csv(index=False).encode("utf-8"), output_sharepoint_path)
 print(f"Uploaded output to SharePoint: {output_sharepoint_path}")
