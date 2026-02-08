@@ -13,8 +13,8 @@
 
 # COMMAND ----------
 
-# Run Funhouse setup to initialize default SharePoint connections and services
-%run setup_python
+# Run Funhouse setup to initialize authenticated default services
+%run /setup_python
 
 # This provides:
 # - fh_sp_client: Default SharePoint client
@@ -25,12 +25,12 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 1. Install Required Libraries
+# MAGIC ## 1. Environment Notes
 
 # COMMAND ----------
 
-# MAGIC %pip install pandas openpyxl
-# MAGIC dbutils.library.restartPython()
+# MAGIC This notebook is designed for the Funhouse runtime.
+# MAGIC Avoid restarting Python after `/setup_python`, since that would clear authenticated service objects.
 
 # COMMAND ----------
 
@@ -46,14 +46,10 @@ from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 import re
 
-# Internal Funhouse service imports
-from services.document_intelligence.azure_document_intelligence import AzureDocumentIntelligence
-from services.translation.azure_text_translator import AzureTextTranslator
-from services.prompter.prompter_api import PrompterAPI
-from services.storage.azure_blob_storage import AzureBlobStorage
+from funhouse.utils import extract_text
 
 # Note: SharePoint services (fh_sp_client, fh_sp_file, fh_sp_list) are available 
-# by default after running %run setup_python - no import needed
+# by default after running %run /setup_python - no import needed
 
 # Databricks imports
 from pyspark.sql import SparkSession
@@ -68,22 +64,21 @@ from pyspark.sql.types import StringType, StructType, StructField, IntegerType, 
 # COMMAND ----------
 
 # Storage Configuration
-INPUT_CONTAINER = "invoices-input"
-OUTPUT_CONTAINER = "invoices-processed"
+# If USE_SHAREPOINT is False, provide a DBFS path that contains PDF invoices.
+INPUT_STORAGE_PATH = "/mnt/invoices-input"
 
 # SharePoint Configuration (Optional - for reading invoices from SharePoint)
 USE_SHAREPOINT = False  # Set to True to read invoices from SharePoint
 SHAREPOINT_LIBRARY_NAME = "Invoices"  # Document library name
 SHAREPOINT_FOLDER_PATH = "/Spanish Invoices"  # Folder path within library
 
-# Initialize Funhouse services (no keys required - handled internally)
-document_intelligence = AzureDocumentIntelligence()
-translator = AzureTextTranslator()
-prompter = PrompterAPI()
-blob_storage = AzureBlobStorage()
+# Initialize authenticated Funhouse services from /setup_python
+document_intelligence = fh_doc
+translator = fh_translator
+prompter = fh_prompter
 
 # Note: SharePoint connection objects (fh_sp_client, fh_sp_file, fh_sp_list) are 
-# available by default after running %run setup_python
+# available by default after running %run /setup_python
 # No need to initialize them - they're already configured and ready to use!
 
 # COMMAND ----------
@@ -257,22 +252,20 @@ def download_file_from_sharepoint(file_name: str, library_name: str, folder_path
     """
     # Check if default SharePoint connection is available
     if 'fh_sp_file' not in globals() or fh_sp_file is None:
-        print("SharePoint not configured. Run %run setup_python first.")
+        print("SharePoint not configured. Run %run /setup_python first.")
         return None
     
     try:
-        # Construct the full file path
+        # Construct a single SharePoint path compatible with fh_sp_file.download_file(path, return_bytes=True)
+        path_parts = [library_name.strip("/")] if library_name else []
         if folder_path:
-            file_path = f"{folder_path}/{file_name}"
-        else:
-            file_path = file_name
-        
+            path_parts.append(folder_path.strip("/"))
+        path_parts.append(file_name.strip("/"))
+        sp_path = "/" + "/".join([part for part in path_parts if part])
+
         # Download file using default Funhouse SharePoint file manager
-        file_content = fh_sp_file.download_file(
-            library_name=library_name,
-            file_path=file_path
-        )
-        
+        file_content = fh_sp_file.download_file(sp_path, return_bytes=True)
+
         return file_content
         
     except Exception as e:
@@ -293,19 +286,29 @@ def get_invoice_files_from_sharepoint(library_name: str, folder_path: str = "") 
     """
     # Check if default SharePoint connection is available
     if 'fh_sp_file' not in globals() or fh_sp_file is None:
-        print("SharePoint not configured. Run %run setup_python first.")
+        print("SharePoint not configured. Run %run /setup_python first.")
         return []
     
     try:
-        # List files using default Funhouse SharePoint file manager
-        files = fh_sp_file.list_files(
-            library_name=library_name,
-            folder_path=folder_path
-        )
-        
+        # Build SharePoint folder path and list files
+        path_parts = [library_name.strip("/")] if library_name else []
+        if folder_path:
+            path_parts.append(folder_path.strip("/"))
+        sp_folder = "/" + "/".join([part for part in path_parts if part])
+
+        files = fh_sp_file.list_files(sp_folder)
+
+        # Normalize different response shapes (string paths vs metadata dicts)
+        normalized_files = []
+        for file_item in files:
+            if isinstance(file_item, str):
+                normalized_files.append(file_item)
+            elif isinstance(file_item, dict):
+                normalized_files.append(file_item.get("name") or file_item.get("file_name") or "")
+
         # Filter for PDF files only
-        pdf_files = [f for f in files if f.lower().endswith('.pdf')]
-        
+        pdf_files = [f for f in normalized_files if f and f.lower().endswith('.pdf')]
+
         return pdf_files
         
     except Exception as e:
@@ -380,8 +383,10 @@ def extract_text_from_pdf(pdf_path: str, pdf_bytes: Optional[bytes] = None) -> T
             model_id="prebuilt-invoice"
         )
         
-        # Extract all text content
+        # Extract all text content (fallback to utility extraction if needed)
         full_text = result.get("content", "")
+        if not full_text:
+            full_text = extract_text(pdf_content, ai=True)
         
         # Extract structured fields if available
         metadata = {
@@ -603,7 +608,7 @@ def process_invoice_batch(pdf_paths: List[str], use_sharepoint: bool = False) ->
             result = {
                 "file_name": os.path.basename(pdf_path) if not use_sharepoint else pdf_path,
                 "file_path": pdf_path,
-                "source": "SharePoint" if use_sharepoint else "Blob Storage",
+                "source": "SharePoint" if use_sharepoint else "DBFS",
                 "vendor_name": classification.get("vendor_name", "Unknown"),
                 "invoice_number": classification.get("invoice_number", "Unknown"),
                 "service_type": classification.get("service_type", "Unknown"),
@@ -633,7 +638,7 @@ def process_invoice_batch(pdf_paths: List[str], use_sharepoint: bool = False) ->
             results.append({
                 "file_name": os.path.basename(pdf_path) if not use_sharepoint else pdf_path,
                 "file_path": pdf_path,
-                "source": "SharePoint" if use_sharepoint else "Blob Storage",
+                "source": "SharePoint" if use_sharepoint else "DBFS",
                 "vendor_name": "Error",
                 "invoice_number": "Error",
                 "service_type": "Error",
@@ -679,28 +684,17 @@ if USE_SHAREPOINT:
     
 else:
     print("=" * 80)
-    print("READING INVOICES FROM AZURE BLOB STORAGE")
+    print("READING INVOICES FROM DBFS STORAGE PATH")
     print("=" * 80)
     
-    # Get list of PDF files from Azure Blob Storage using Funhouse service
+    # Get list of PDF files from DBFS path
     try:
-        # List files in container
-        files = blob_storage.list_blobs(container_name=INPUT_CONTAINER)
-        pdf_paths = [f for f in files if f.lower().endswith('.pdf')]
-        print(f"\nFound {len(pdf_paths)} PDF files in Blob Storage")
+        pdf_files = dbutils.fs.ls(INPUT_STORAGE_PATH)
+        pdf_paths = [file.path for file in pdf_files if file.path.lower().endswith('.pdf')]
+        print(f"\nFound {len(pdf_paths)} PDF files in: {INPUT_STORAGE_PATH}")
     except Exception as e:
-        print(f"Error listing blob storage files: {e}")
-        # Fallback to dbutils if blob service doesn't work as expected
-        print("Attempting fallback to dbutils...")
-        try:
-            storage_account = blob_storage.account_name if hasattr(blob_storage, 'account_name') else "your-storage-account"
-            input_path = f"abfss://{INPUT_CONTAINER}@{storage_account}.dfs.core.windows.net/"
-            pdf_files = dbutils.fs.ls(input_path)
-            pdf_paths = [file.path for file in pdf_files if file.path.lower().endswith('.pdf')]
-            print(f"Found {len(pdf_paths)} PDF files via dbutils")
-        except Exception as e2:
-            print(f"Fallback also failed: {e2}")
-            pdf_paths = []
+        print(f"Error listing files from {INPUT_STORAGE_PATH}: {e}")
+        pdf_paths = []
 
 # COMMAND ----------
 
@@ -805,16 +799,16 @@ for idx, row in review_needed.iterrows():
 # MAGIC ## Usage Instructions
 # MAGIC 
 # MAGIC ### Setup Required:
-# MAGIC 1. Run `%run setup_python` in the first cell (already included in Section 0)
+# MAGIC 1. Run `%run /setup_python` in the first cell (already included in Section 0)
 # MAGIC    - This initializes all Funhouse services automatically
 # MAGIC    - Provides default SharePoint connections: fh_sp_client, fh_sp_file, fh_sp_list
 # MAGIC    - No manual configuration needed
 # MAGIC 
 # MAGIC 2. Choose your invoice source (in Section 3):
 # MAGIC    ```python
-# MAGIC    # For Blob Storage
+# MAGIC    # For DBFS storage path
 # MAGIC    USE_SHAREPOINT = False
-# MAGIC    INPUT_CONTAINER = "invoices-input"
+# MAGIC    INPUT_STORAGE_PATH = "/mnt/invoices-input"
 # MAGIC    
 # MAGIC    # For SharePoint
 # MAGIC    USE_SHAREPOINT = True
@@ -834,10 +828,9 @@ for idx, row in review_needed.iterrows():
 # MAGIC - Optional: SharePoint list tracking (if using SharePoint source)
 # MAGIC 
 # MAGIC ### Funhouse Services Used:
-# MAGIC - `AzureDocumentIntelligence`: OCR and invoice field extraction
-# MAGIC - `AzureTextTranslator`: Spanish to English translation
-# MAGIC - `PrompterAPI`: AI-powered classification and extraction
-# MAGIC - `AzureBlobStorage`: File storage and retrieval
-# MAGIC - `fh_sp_client`: Default SharePoint client (from setup_python)
-# MAGIC - `fh_sp_file`: Default SharePoint file manager (from setup_python)
-# MAGIC - `fh_sp_list`: Default SharePoint list manager (from setup_python)
+# MAGIC - `fh_doc`: OCR and invoice field extraction
+# MAGIC - `fh_translator`: Spanish to English translation
+# MAGIC - `fh_prompter`: AI-powered classification and extraction
+# MAGIC - `fh_sp_client`: Default SharePoint client (from /setup_python)
+# MAGIC - `fh_sp_file`: Default SharePoint file manager (from /setup_python)
+# MAGIC - `fh_sp_list`: Default SharePoint list manager (from /setup_python)
