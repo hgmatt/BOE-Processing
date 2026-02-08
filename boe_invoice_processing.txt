@@ -23,6 +23,7 @@ from funhouse.utils import extract_text
 # Configuration (adjust as needed)
 SHAREPOINT_FOLDER_PATH = "/Shared Documents/BOE"
 ALLOWED_EXTENSIONS = (".pdf", ".jpg", ".jpeg", ".png", ".tif", ".tiff")
+SKIP_EXTENSIONS = (".csv",)
 MAX_TEXT_CHARS = 7000
 
 FAM_BOE_GUIDELINES = """
@@ -198,9 +199,9 @@ file_paths = [
     item if isinstance(item, str) else item.get("path") or item.get("serverRelativeUrl")
     for item in sp_items
 ]
-file_paths = [p for p in file_paths if p and p.lower().endswith(ALLOWED_EXTENSIONS)]
+file_paths = [p for p in file_paths if p and not p.lower().endswith(SKIP_EXTENSIONS)]
 
-print(f"Found {len(file_paths)} candidate files in SharePoint folder: {SHAREPOINT_FOLDER_PATH}")
+print(f"Found {len(file_paths)} non-CSV files in SharePoint folder: {SHAREPOINT_FOLDER_PATH}")
 
 # COMMAND ----------
 
@@ -210,6 +211,25 @@ system_prompt = build_classifier_system_prompt()
 for idx, file_path in enumerate(file_paths, 1):
     print(f"Processing {idx}/{len(file_paths)}: {file_path}")
     try:
+        if not file_path.lower().endswith(ALLOWED_EXTENSIONS):
+            results.append(
+                {
+                    "file_path": file_path,
+                    "vendor_name": "",
+                    "description_of_service": "",
+                    "type_of_service": "",
+                    "amount": "",
+                    "currency": "",
+                    "invoice_id": "",
+                    "date": "",
+                    "allowability_assessment": "needs review",
+                    "allowability_score": 0,
+                    "assessment_reason": "Skipped file type not currently supported for extraction.",
+                    "processed_utc": datetime.utcnow().isoformat(),
+                }
+            )
+            continue
+
         content = sp_file.download_file(file_path, return_bytes=True)
 
         # Use multiple Document Intelligence models for machine PDFs, scans, and handwriting.
