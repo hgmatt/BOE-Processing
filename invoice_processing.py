@@ -20,6 +20,14 @@
 # - fh_sp_client: Default SharePoint client
 # - fh_sp_file: Default SharePoint file manager
 # - fh_sp_list: Default SharePoint list manager
+#
+# Optional connection check:
+# print("SharePoint client initialized successfully")
+# print(f"Web title: {fh_sp_client.get_site_title()}")
+#
+# Example output:
+# SharePoint client initialized successfully
+# Web title: Madden-Databricks Test
 # - Other Funhouse framework initialization
 
 # COMMAND ----------
@@ -31,6 +39,25 @@
 
 # MAGIC This notebook is designed for the Funhouse runtime.
 # MAGIC Avoid restarting Python after `/setup_python`, since that would clear authenticated service objects.
+# MAGIC 
+# MAGIC ### Default SharePoint Connection
+# MAGIC Use these pre-initialized objects directly:
+# MAGIC - `fh_sp_client`
+# MAGIC - `fh_sp_file`
+# MAGIC - `fh_sp_list`
+# MAGIC 
+# MAGIC ### Optional: Additional SharePoint Connections
+# MAGIC If you need to connect to another SharePoint site in the same notebook session:
+# MAGIC 
+# MAGIC ```python
+# MAGIC %run /setup_python
+# MAGIC 
+# MAGIC other_sharepoint_url = "https://usdos.sharepoint.com/sites/FunhouseUsers/"
+# MAGIC other_fh_sp_client = SharePointClient(site_url=other_sharepoint_url, backend="office365_oauth")
+# MAGIC other_fh_sp_file = other_fh_sp_client.file_manager
+# MAGIC other_fh_sp_list = other_fh_sp_client.list_manager
+# MAGIC other_fh_sp_permission = other_fh_sp_client.permission_manager
+# MAGIC ```
 
 # COMMAND ----------
 
