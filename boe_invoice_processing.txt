@@ -103,6 +103,32 @@ Use the text and fields together. Keep output in English.
 If uncertain what the file is, explicitly explain uncertainty in assessment_reason using the required prefix."""
 
 
+def build_text_triage_system_prompt() -> str:
+    return """You are triaging a Spanish document for BOE processing.
+Read the extracted text and decide whether additional Document Intelligence invoice field extraction
+is likely to add value.
+
+Return JSON only:
+{
+  "doc_type": "invoice|receipt|utility|letter|unknown",
+  "is_boe_related": true,
+  "run_document_intelligence": false,
+  "triage_reason": ""
+}
+
+Set run_document_intelligence=true only when the text suggests invoice-style structured fields
+or missing/unclear key data (vendor, amount, date, invoice id) that DI might recover."""
+
+
+def build_text_triage_user_prompt(file_name: str, extracted_text: str) -> str:
+    return f"""File name: {file_name}
+
+Extracted text:
+{extracted_text[:MAX_TEXT_CHARS]}
+
+Determine if this is BOE-related and whether to run Document Intelligence."""
+
+
 def extract_invoice_fields(di_result: Dict[str, Any]) -> Dict[str, Any]:
     if not di_result or "documents" not in di_result or not di_result["documents"]:
         return {}
@@ -147,12 +173,8 @@ def run_document_intelligence(file_bytes: bytes) -> Dict[str, Any]:
     return combined
 
 
-def extract_best_available_text(file_path: str, file_bytes: bytes, di_result: Dict[str, Any]) -> str:
-    """Extract text robustly across digital PDFs, scanned images, and handwriting."""
-    di_text = (di_result or {}).get("content", "") or ""
-    if di_text.strip():
-        return di_text
-
+def extract_best_available_text(file_path: str, file_bytes: bytes) -> str:
+    """Extract text robustly before any Document Intelligence model is executed."""
     # AI-aware text extraction can route to OCR and handwriting-capable paths.
     ai_text = extract_text(file_bytes, ai=True)
     if ai_text and ai_text.strip():
@@ -203,7 +225,13 @@ def build_output_row(file_path: str, model_json: Dict[str, Any]) -> Dict[str, An
 # Native SharePoint listing; no custom wrapper around list/download behavior
 sp_items = sp_file.ls(SHAREPOINT_FOLDER_PATH, recursive=True, type="file", include_properties=False)
 file_paths = [
-    item if isinstance(item, str) else item.get("path") or item.get("serverRelativeUrl")
+    item
+    if isinstance(item, str)
+    else item.get("path")
+    or item.get("serverRelativeUrl")
+    or item.get("url")
+    or item.get("file_path")
+    or item.get("name")
     for item in sp_items
 ]
 file_paths = [p for p in file_paths if p and not p.lower().endswith(SKIP_EXTENSIONS)]
@@ -214,6 +242,7 @@ print(f"Found {len(file_paths)} non-CSV files in SharePoint folder: {SHAREPOINT_
 
 results: List[Dict[str, Any]] = []
 system_prompt = build_classifier_system_prompt()
+triage_system_prompt = build_text_triage_system_prompt()
 
 for idx, file_path in enumerate(file_paths, 1):
     print(f"Processing {idx}/{len(file_paths)}: {file_path}")
@@ -239,10 +268,26 @@ for idx, file_path in enumerate(file_paths, 1):
 
         content = sp_file.download_file(file_path, return_bytes=True)
 
-        # Use multiple Document Intelligence models for machine PDFs, scans, and handwriting.
-        di_result = run_document_intelligence(content)
-        invoice_fields = extract_invoice_fields(di_result)
-        extracted_text = extract_best_available_text(file_path, content, di_result)
+        # Step 1: Always extract text first.
+        extracted_text = extract_best_available_text(file_path, content)
+
+        # Step 2: Have the model decide whether Document Intelligence is needed.
+        triage_prompt = build_text_triage_user_prompt(file_path.split("/")[-1], extracted_text)
+        triage_response = prompter.chat(
+            messages=[
+                {"role": "system", "content": triage_system_prompt},
+                {"role": "user", "content": triage_prompt},
+            ],
+            temperature=0.0,
+            response_format="json",
+            max_tokens=250,
+        )
+        triage_json = json.loads(triage_response)
+
+        invoice_fields: Dict[str, Any] = {}
+        if bool(triage_json.get("run_document_intelligence", False)):
+            di_result = run_document_intelligence(content)
+            invoice_fields = extract_invoice_fields(di_result)
 
         user_prompt = build_classifier_user_prompt(file_path.split("/")[-1], extracted_text, invoice_fields)
         response = prompter.chat(
